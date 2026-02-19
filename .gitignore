@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# IDEs
+.idea/
+.vscode/
+
+# Environment variables (IMPORTANT)
+.env
+auth.json
+
+# OS
+Thumbs.db
+Desktop.ini
