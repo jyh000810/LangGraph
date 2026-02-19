@@ -62,6 +62,9 @@ def _create_llm(temperature: float) -> ChatOllama:
 async def lifespan(app: FastAPI):
     global redis_pool, qdrant_client, llm, llm_creative, _embeddings, invoice_graph
 
+    # Redis 풀 초기화
+    redis_pool = aioredis.from_url(settings.redis_url, decode_responses=True)
+
     qdrant_client = AsyncQdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
 
     llm = _create_llm(temperature=0.01)

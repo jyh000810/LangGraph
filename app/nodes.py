@@ -34,7 +34,13 @@ from app.prompts import (
 )
 from app.state import InvoiceState
 from app import rag
-from app.utils import load_invoices_from_redis, parse_korean_amount, save_invoice_to_redis
+from app.utils import (
+    AgentError,
+    LLMResponseError,
+    load_invoices_from_redis,
+    parse_korean_amount,
+    save_invoice_to_redis,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +59,17 @@ def _is_cancel(text: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════
-#  1. route_intent — LLM 의도 분류 (fresh invoke 시에만 호출)
+#  [Agent Group: Intent] 사용자의 의도를 분석하고 분류한다.
 # ═══════════════════════════════════════════════════════════
 
 async def route_intent(state: InvoiceState, config: RunnableConfig) -> dict:
-    """사용자 의도를 분류하고, 현재 질문을 messages에 추가한다."""
+    """사용자의 입력을 분석하여 ISSUE_INVOICE, SELECT_HISTORY 등으로 분류한다."""
     question = state.get("question", "")
     llm = config["configurable"]["llm"]
 
+    # 히스토리 및 현재 슬롯 상태 구성
     messages = state.get("messages") or []
     history_text = build_history_text_from_messages(messages)
-
     slots = state.get("slots")
     status = state.get("status", "")
     current_state = build_current_state_from_slots(slots, status)
@@ -74,14 +80,16 @@ async def route_intent(state: InvoiceState, config: RunnableConfig) -> dict:
     )
 
     try:
+        # LLM 호출 (의도 분류)
         resp = await llm.ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=question),
         ])
-        raw = resp.content.strip().upper()
+        raw = str(resp.content).strip().upper()
         raw_clean = re.sub(r"[^A-Z_]", "", raw)
-        logger.info("[route_intent] LLM 응답: %s", raw)
+        logger.info("[IntentAgent] LLM 응답 분석: %s", raw_clean)
 
+        # 정확한 매칭 시도
         for intent in UserIntent:
             if intent.value == raw_clean:
                 return {
@@ -89,6 +97,7 @@ async def route_intent(state: InvoiceState, config: RunnableConfig) -> dict:
                     "intent": intent.value,
                 }
 
+        # 부분 매칭 시도
         for intent in UserIntent:
             if intent.value in raw:
                 return {
@@ -96,17 +105,17 @@ async def route_intent(state: InvoiceState, config: RunnableConfig) -> dict:
                     "intent": intent.value,
                 }
 
+        # 분류 실패 시 기본값 (OTHER)
+        logger.warning("[IntentAgent] 의도 분류 모호함 -> OTHER 기본값 할당")
         return {
             "messages": [HumanMessage(content=question)],
             "intent": UserIntent.OTHER.value,
         }
 
-    except Exception:
-        logger.exception("[route_intent] LLM 오류")
-        return {
-            "messages": [HumanMessage(content=question)],
-            "intent": UserIntent.OTHER.value,
-        }
+    except Exception as e:
+        logger.error("[IntentAgent] 의도 분석 중 오류 발생: %s", e)
+        # 예외를 던지면 main.py의 핸들러에서 처리됨 (Step 1)
+        raise LLMResponseError("사용자 의도를 파악하는 중 문제가 발생했습니다.") from e
 
 
 def decide_intent(state: InvoiceState) -> str:
@@ -115,15 +124,17 @@ def decide_intent(state: InvoiceState) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
-#  2. extract_slots — LLM 슬롯 추출 + 기존 슬롯과 병합
+#  [Agent Group: Extraction] 대화 내용에서 슬롯 정보를 추출한다.
 # ═══════════════════════════════════════════════════════════
 
 async def extract_slots(state: InvoiceState, config: RunnableConfig) -> dict:
-    """LLM으로 슬롯을 추출하고 기존 슬롯과 병합한다."""
+    """사용자의 발화에서 거래처, 품목, 금액, 날짜 정보를 추출하여 기존 정보와 병합한다."""
     question = state.get("question", "")
     llm = config["configurable"]["llm"]
-    existing = state.get("slots")
-    existing_str = existing.model_dump_json() if existing else ""
+    existing = state.get("slots") or InvoiceSlots()
+    
+    # 프롬프트 구성 (현재 날짜, 이전 슬롯, 대화 이력 포함)
+    existing_str = existing.model_dump_json()
     messages = state.get("messages") or []
     history_text = build_history_text_from_messages(messages)
     today = _today()
@@ -135,34 +146,44 @@ async def extract_slots(state: InvoiceState, config: RunnableConfig) -> dict:
     )
 
     try:
+        # LLM 호출 (슬롯 추출)
         resp = await llm.ainvoke([
             SystemMessage(content=prompt),
             HumanMessage(content=question),
         ])
-        raw = resp.content.strip()
-        logger.info("[extract_slots] LLM 응답: %s", raw)
+        raw = str(resp.content).strip()
+        logger.info("[ExtractionAgent] 추출 시도 LLM 응답: %s", raw)
 
+        # JSON 응답 파싱
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not match:
-            logger.warning("[extract_slots] JSON 없음: %s", raw[:100])
+            logger.warning("[ExtractionAgent] JSON 형식의 응답을 찾을 수 없음 -> 기존 상태 유지")
             return {"slots": existing, "status": "extracting"}
 
         data = json.loads(match.group())
-        cleaned = {k: (v if v and v != "null" else None) for k, v in data.items()}
+        # 불필요한 null 문자열 제거 및 정규화
+        cleaned = {k: (v if v and str(v).lower() != "null" else None) for k, v in data.items()}
 
+        # 금액 정보가 포함된 경우 한글/숫자 혼합 포맷 파싱 (Step 1: 유효성 보강)
         if cleaned.get("amount"):
-            parsed = parse_korean_amount(cleaned["amount"])
-            if parsed:
-                cleaned["amount"] = parsed
+            parsed_amount = parse_korean_amount(str(cleaned["amount"]))
+            if parsed_amount:
+                cleaned["amount"] = parsed_amount
 
+        # 신규 추출 데이터와 기존 데이터 병합
         extracted = InvoiceSlots(**cleaned)
-        merged = existing.merge(extracted) if existing else extracted
-        logger.info("[extract_slots] 병합 결과: %s", merged.summary())
+        merged = existing.merge(extracted)
+        
+        logger.info("[ExtractionAgent] 슬롯 병합 성공: 거래처=%s, 금액=%s", merged.company, merged.amount)
         return {"slots": merged, "status": "extracting"}
 
-    except Exception:
-        logger.exception("[extract_slots] 오류")
-        return {"slots": existing, "status": "extracting"}
+    except json.JSONDecodeError as e:
+        logger.error("[ExtractionAgent] JSON 파싱 실패: %s", e)
+        raise LLMResponseError("추출된 데이터 형식이 올바르지 않습니다.") from e
+    except Exception as e:
+        logger.exception("[ExtractionAgent] 알 수 없는 오류 발생: %s", e)
+        # 중요하지 않은 오류인 경우 기존 슬롯 반환으로 대체 가능하나, 여기서는 에러 발생 시킴
+        raise AgentError("정보 추출 중 시스템 오류가 발생했습니다.") from e
 
 
 # ═══════════════════════════════════════════════════════════
@@ -556,41 +577,16 @@ def _match_company_from_candidates(
     """사용자 입력을 후보 목록과 매칭한다.
 
     우선순위:
-    1. 숫자 선택 ("1", "1번", "2번" 등)
-    2. 완전 일치 (공백·대소문자 무시)
-    3. 사용자 입력이 거래처명에 포함
-    4. 거래처명이 사용자 입력에 포함
+    1. 완전 일치 (공백·대소문자 무시)
+    2. 사용자 입력이 거래처명에 포함
+    3. 거래처명이 사용자 입력에 포함
     """
     user_stripped = user_input.strip()
 
-    # 1순위: 번호 선택
-    m = re.match(r'^(\d+)[번]?$', user_stripped)
-    if m:
-        idx = int(m.group(1)) - 1   # 1-indexed → 0-indexed
-        if 0 <= idx < len(candidates):
-            logger.info("[매칭-번호] '%s' → %s", user_input, candidates[idx].company)
-            return candidates[idx]
-
-    user_clean = user_stripped.replace(" ", "").lower()
-    if not user_clean:
-        return None
-
-    # 2순위: 완전 일치
+    # 1순위: 완전 일치
     for c in candidates:
         if user_clean == c.company.replace(" ", "").lower():
             logger.info("[매칭-완전일치] '%s' → %s", user_input, c.company)
-            return c
-
-    # 3순위: 포함 (사용자 → 거래처)
-    for c in candidates:
-        if user_clean in c.company.replace(" ", "").lower():
-            logger.info("[매칭-포함] '%s' → %s", user_input, c.company)
-            return c
-
-    # 4순위: 포함 (거래처 → 사용자)
-    for c in candidates:
-        if c.company.replace(" ", "").lower() in user_clean:
-            logger.info("[매칭-역포함] '%s' → %s", user_input, c.company)
             return c
 
     logger.info("[매칭-실패] '%s'", user_input)

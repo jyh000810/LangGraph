@@ -8,8 +8,26 @@ import json
 import logging
 import re
 from decimal import Decimal, InvalidOperation
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# ── 커스텀 예외 클래스 (Step 1: 에러 핸들링 강화) ──
+
+class AgentError(Exception):
+    """에이전트 실행 중 발생하는 기본 예외"""
+    def __init__(self, message: str, detail: str = None):
+        super().__init__(message)
+        self.message = message
+        self.detail = detail
+
+class LLMResponseError(AgentError):
+    """LLM 응답 파싱 실패 또는 부적절한 응답 시 발생"""
+    pass
+
+class ExternalServiceError(AgentError):
+    """Redis, Qdrant 등 외부 서비스 연동 실패 시 발생"""
+    pass
 
 # Redis 키 패턴 (기존 프로젝트와 동일)
 CHAT_HISTORY_KEY  = "chat:history:{user_id}"
