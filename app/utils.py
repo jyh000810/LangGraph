@@ -9,6 +9,7 @@ import logging
 import re
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
+from app.models import InvoiceSlots
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,8 @@ def parse_korean_amount(text: str) -> str | None:
 
     if re.match(r'^[0-9.]+$', clean_text):
         try:
-            return str(int(Decimal(clean_text)))
+            val = int(Decimal(clean_text))
+            return str(val) if val > 0 else None
         except InvalidOperation:
             return None
 
@@ -161,25 +163,24 @@ async def load_chat_history(redis, user_id: str, limit: int = 30):
 
 # ── Redis 발행 이력 헬퍼 ──
 
-async def save_invoice_to_redis(redis, user_id: str, slots) -> None:
+async def save_invoice_to_redis(redis, user_id: str, invoice_slots) -> None:
     """완성된 슬롯을 Redis 발행 이력에 저장한다. (최대 20건, TTL 30일)"""
     key = INVOICE_HISTORY_KEY.format(user_id=user_id)
     try:
-        record = json.dumps(slots.model_dump(), ensure_ascii=False)
+        record = json.dumps(invoice_slots.model_dump(), ensure_ascii=False)
         pipe = redis.pipeline()
         pipe.rpush(key, record)
         pipe.ltrim(key, -INVOICE_KEEP, -1)
         pipe.expire(key, INVOICE_TTL)
         await pipe.execute()
-        logger.info("[InvoiceHistory] 저장 — user_id=%s, company=%s", user_id, slots.company)
+        logger.info("[InvoiceHistory] 저장 — user_id=%s, company=%s", user_id, invoice_slots.company)
     except Exception:
         logger.exception("[InvoiceHistory] 저장 실패 — user_id=%s", user_id)
 
 
 async def load_invoices_from_redis(redis, user_id: str, limit: int = 10):
     """Redis에서 발행 이력을 로드한다 (최신순)."""
-    from app.models import InvoiceSlots
-
+    
     key = INVOICE_HISTORY_KEY.format(user_id=user_id)
     try:
         raw_list = await redis.lrange(key, -limit, -1)

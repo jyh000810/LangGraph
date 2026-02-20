@@ -23,8 +23,9 @@ class InvoiceState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
 
     # ── 슬롯 상태 ──
-    slots: InvoiceSlots | None
+    invoice_slots: InvoiceSlots | None
     candidates: list[CompanyCandidate]
+    company_candidate: CompanyCandidate | None  # 확정된 거래처 (type 보존용)
 
     # ── 라우팅 / 흐름 제어 ──
     intent: str    # UserIntent.value

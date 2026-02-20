@@ -33,7 +33,7 @@ from qdrant_client import AsyncQdrantClient
 
 from app.config import settings
 from app.graph import build_graph
-from app.models import ChatRequest, ChatResponse, ChatResult
+from app.models import ChatRequest, ChatResponse, ChatResult, CompanyInfo, InvoiceData
 from app.utils import append_chat_history, load_chat_history, load_invoices_from_redis
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -44,31 +44,38 @@ logger = logging.getLogger(__name__)
 redis_pool: aioredis.Redis | None = None
 qdrant_client: AsyncQdrantClient | None = None
 llm: ChatOllama | None = None
+llm_fast: ChatOllama | None = None
+llm_logical: ChatOllama | None = None
 llm_creative: ChatOllama | None = None
 _embeddings: OllamaEmbeddings | None = None
 invoice_graph: StateGraph | None = None
 
 
-def _create_llm(temperature: float) -> ChatOllama:
+def _create_llm(model: str, temperature: float) -> ChatOllama:
     return ChatOllama(
         base_url=settings.ollama_base_url,
-        model=settings.ollama_model_name,
+        model=model,
         temperature=temperature,
         timeout=30,
+        options={
+            "num_ctx": 8192
+        }
     )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global redis_pool, qdrant_client, llm, llm_creative, _embeddings, invoice_graph
+    global redis_pool, qdrant_client, llm, llm_fast, llm_logical, llm_creative, _embeddings, invoice_graph
 
     # Redis 풀 초기화
     redis_pool = aioredis.from_url(settings.redis_url, decode_responses=True)
 
     qdrant_client = AsyncQdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
 
-    llm = _create_llm(temperature=0.01)
-    llm_creative = _create_llm(temperature=0.7)
+    llm = _create_llm(model=settings.ollama_model_name, temperature=0.01)           # Qwen2.5 (Standard)
+    llm_fast = _create_llm(model=settings.ollama_model_fast, temperature=0.01)      # Phi-3.5 (Fast)
+    llm_logical = _create_llm(model=settings.ollama_model_logical, temperature=0.01) # Gemma-2 (Logical)
+    llm_creative = _create_llm(model=settings.ollama_model_creative, temperature=0.7)    # Qwen2.5 (Creative)
 
     _embeddings = OllamaEmbeddings(
         base_url=settings.ollama_base_url,
@@ -104,6 +111,8 @@ def _make_config(user_id: str) -> dict:
             "qdrant": qdrant_client,
             "embed_fn": _embed_fn,
             "llm": llm,
+            "llm_fast": llm_fast,
+            "llm_logical": llm_logical,
             "llm_creative": llm_creative,
         }
     }
@@ -200,7 +209,7 @@ async def chat(user_id: str, req: ChatRequest):
         interrupt_data = _extract_interrupt_data(new_state)
         msg = interrupt_data.get("message", "추가 정보가 필요합니다.")
         action = interrupt_data.get("type")
-        raw = {k: v for k, v in interrupt_data.items() if k != "message"}
+        raw = {k: v for k, v in interrupt_data.items() if k not in ["message", "type"]}
 
         logger.info("[Chat] interrupt 응답 — type=%s", action)
         await append_chat_history(redis_pool, user_id, "assistant", msg)
@@ -215,11 +224,23 @@ async def chat(user_id: str, req: ChatRequest):
     raw_data = result.get("response_data")
     response_msg = result.get("response_message", "")
 
+    # ready_invoice: company/invoice 분리 응답
+    if action == "ready_invoice" and raw_data:
+        company_dict = raw_data.get("company") or {}
+        invoice_dict = raw_data.get("invoice") or {}
+        result_obj = ChatResult(
+            action=action,
+            company=CompanyInfo(**company_dict) if company_dict.get("company") else None,
+            invoice=InvoiceData(**invoice_dict) if all(invoice_dict.get(k) for k in ("company", "item", "amount", "date")) else None,
+        )
+    else:
+        result_obj = ChatResult(action=action, raw=raw_data) if (action or raw_data) else None
+
     await append_chat_history(redis_pool, user_id, "assistant", response_msg)
     return ChatResponse(
         type=result.get("response_type", "message"),
         text=response_msg,
-        result=ChatResult(action=action, raw=raw_data) if (action or raw_data) else None,
+        result=result_obj,
     )
 
 
@@ -245,12 +266,12 @@ async def get_graph_state(user_id: str):
     config = _make_config(user_id)
     state = await invoice_graph.aget_state(config)
 
-    slots = state.values.get("slots")
+    invoice_slots = state.values.get("invoice_slots")
     return {
         "user_id": user_id,
         "next": list(state.next),
         "interrupted": bool(state.next),
-        "slots": slots.model_dump() if slots else None,
+        "invoice_slots": invoice_slots.model_dump() if invoice_slots else None,
         "candidates": [c.model_dump() for c in (state.values.get("candidates") or [])],
         "intent": state.values.get("intent"),
         "status": state.values.get("status"),

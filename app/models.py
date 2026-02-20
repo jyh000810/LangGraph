@@ -24,17 +24,33 @@ class ChatResponse(BaseModel):
     result: ChatResult | None = None
 
 
+class CompanyInfo(BaseModel):
+    """거래처 확정 정보 (API 응답용)"""
+    seq: str
+    company: str
+    type: str
+
+
+class InvoiceData(BaseModel):
+    """세금계산서 발행 데이터 (API 응답용)"""
+    company: str
+    item: str
+    amount: str
+    date: str
+
+
 class ChatResult(BaseModel):
     """응답 내부 결과"""
-    action: str | None = None          # "ready_invoice" | "need_more_info" | "need_client_choice" | "ask_company"
-    raw: dict[str, Any] | None = None
+    action: str | None = None          # "ready_invoice" | "need_more_info" | "need_client_choice"
+    company: CompanyInfo | None = None # 확정 거래처 정보 (ready_invoice 시)
+    invoice: InvoiceData | None = None # 세금계산서 데이터 (ready_invoice 시)
+    raw: dict[str, Any] | None = None  # interrupt 데이터 (need_client_choice 등)
 
 
 # ── 세금계산서 슬롯 ──
 
 class InvoiceSlots(BaseModel):
     """세금계산서 필수 정보"""
-    seq: str | None = None       # 사업자코드
     company: str | None = None   # 거래처명
     item: str | None = None      # 품목
     amount: str | None = None    # 금액 (숫자 문자열)
@@ -49,8 +65,8 @@ class InvoiceSlots(BaseModel):
 
     def merge(self, other: InvoiceSlots) -> InvoiceSlots:
         """other의 non-null 값으로 현재 슬롯을 덮어쓴다."""
+
         return InvoiceSlots(
-            seq=other.seq or self.seq,
             company=other.company or self.company,
             item=other.item or self.item,
             amount=other.amount or self.amount,
@@ -67,6 +83,7 @@ class InvoiceSlots(BaseModel):
 
 class CompanyCandidate(BaseModel):
     seq: str
+    type: str
     company: str
     score: float = 0.0
 

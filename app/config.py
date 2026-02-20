@@ -10,6 +10,12 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     ollama_base_url: str = "http://220.118.0.205:11434"
     ollama_model_name: str = "gpt-oss:20b"
+    ollama_model_fast: str = "gpt-oss:20b"
+    ollama_model_logical: str = "gpt-oss:20b"
+    ollama_model_creative: str = "gpt-oss:20b"
+    # ollama_model_name: str = "qwen2.5:14b"
+    # ollama_model_logical: str = "gemma2:9b"
+    # ollama_model_creative: str = "llama3.1:8b"
     ollama_embedding_model: str = "bge-m3"
     redis_url: str = "redis://220.118.0.205:6379/0"
     qdrant_host: str = "220.118.0.205"

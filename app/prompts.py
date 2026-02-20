@@ -31,7 +31,8 @@ INTENT_ROUTER_SYSTEM = """\
 2. 현재 상태가 '새 요청 대기 중':
    - 거래처/품목/금액 중 하나라도 포함 → ISSUE_INVOICE
 
-반드시 ISSUE_INVOICE, HISTORY_BASED, CANCEL, OTHER 중 하나만 대답하세요.
+반드시 아래 JSON 형식으로만 응답하세요:
+{{"intent": "ISSUE_INVOICE" | "HISTORY_BASED" | "CANCEL" | "OTHER"}}
 
 대화 이력:
 {chat_history}
@@ -40,32 +41,31 @@ INTENT_ROUTER_SYSTEM = """\
 # ── SlotExtractor 시스템 프롬프트 ──
 
 SLOT_EXTRACTOR_SYSTEM = """\
-당신은 세금계산서 데이터 추출기입니다.
-사용자 입력에서 거래처(company), 품목(item), 금액(amount), 날짜(date)를 추출하세요.
-확인할 수 없는 필드는 null로 남겨두세요.
+당신은 세금계산서 발행 데이터 추출 전문가입니다.
+반드시 [현재 메시지]에서만 정보를 추출하세요. 대화 이력은 사용하지 마세요.
 
-**금액 규칙:**
-- 금액은 사용자가 말한 표현 그대로 추출하세요. 숫자로 변환하지 마세요.
-- 단, 명백한 오타만 보정하세요.
-- 예시: "오천만원" → "오천만원" (그대로)
-- 예시: "500만원" → "500만원" (그대로)
-- 예시: "1억5천만" → "1억5천만" (그대로)
-- 예시: "오쳔만원" → "오천만원" (오타 보정)
+### 추출 규칙:
+1. **현재 메시지만 분석:** [현재 메시지]에 사용자가 직접 언급한 내용만 추출합니다.
+   - 이전 대화 내용은 일절 사용하지 마세요.
+   - [기존 입력 데이터]는 파이썬 시스템이 병합하므로 억지로 채우지 마세요.
+
+2. **null 원칙:** [현재 메시지]에 없는 필드는 반드시 `null`로 반환하세요.
+
+3. **수정 우선:** 현재 메시지의 정보가 [기존 입력 데이터]와 다르면 새 값으로 업데이트하세요.
+
+4. **원문 보존:** 모든 필드는 사용자가 입력한 언어와 표현을 그대로 유지하세요.
+   - 절대 다른 언어로 번역하거나 변환하지 마세요.
 
 **날짜 규칙:**
 - 날짜는 반드시 YYYY-MM-DD 형식으로 변환하세요.
 - 오늘 날짜: {today}
-- "오늘" → 오늘 날짜, "내일" → 내일 날짜, "모레" → 모레 날짜
-- "어제" → 어제 날짜, "12월 25일" → 올해 12월 25일
-- 날짜 언급이 없으면 오늘 날짜로 추출하세요.
+- 미래날짜는 허용하지 않습니다. [현재 메시지]에 미래 날짜가 언급되면 `null`로 반환하세요.
+- [현재 메시지]에 날짜 언급이 없으면 반드시 `null`로 반환하세요.
 
 반드시 아래 JSON 형식으로만 응답하세요 (다른 텍스트 없이):
 {{"company": "...", "item": "...", "amount": "...", "date": "..."}}
 
 기존 입력 데이터: {existing_slots}
-
-대화 이력:
-{chat_history}
 """
 
 # ── InvoiceSelector 시스템 프롬프트 ──
@@ -95,9 +95,9 @@ OTHER_FALLBACK = "무엇을 도와드릴까요? 세금계산서 발행을 원하
 
 # ── 프롬프트 빌드 헬퍼 함수들 ──
 
-def build_current_state_from_slots(slots: InvoiceSlots | None, status: str) -> str:
+def build_current_state_from_slots(invoice_slots: InvoiceSlots | None, status: str) -> str:
     """현재 상태를 IntentRouter에 전달할 한 줄 설명으로 변환."""
-    if slots and (slots.company or slots.item or slots.amount) and status in ("extracting", ""):
+    if invoice_slots and (invoice_slots.company or invoice_slots.item or invoice_slots.amount) and status in ("extracting", ""):
         return "세금계산서 데이터 수집 중"
     return "새 요청 대기 중"
 
@@ -116,10 +116,10 @@ def build_history_text_from_messages(messages: list[AnyMessage], limit: int = 30
 def build_invoice_summary(invoices: list[InvoiceSlots]) -> str:
     """과거 발행 이력을 LLM 전달용 요약 문자열로 변환."""
     lines = []
-    for i, slots in enumerate(invoices):
+    for i, invoice_slots in enumerate(invoices):
         _or = lambda v: v if v else "(없음)"
         lines.append(
-            f"[{i}번째 전] 거래처={_or(slots.company)}, 품목={_or(slots.item)}, "
-            f"금액={_or(slots.amount)}, 날짜={_or(slots.date)}"
+            f"[{i}번째 전] 거래처={_or(invoice_slots.company)}, 품목={_or(invoice_slots.item)}, "
+            f"금액={_or(invoice_slots.amount)}, 날짜={_or(invoice_slots.date)}"
         )
     return "\n".join(lines)

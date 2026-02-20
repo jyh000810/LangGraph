@@ -5,11 +5,8 @@ LangGraph 그래프 정의 — MemorySaver + interrupt() + 순환 엣지
   START → route_intent → (의도 분기)
     ├─ issue_invoice → extract_slots → search_company → (결과 분기)
     │     ├─ exact_match / confirmed / no_company → check_slots
-    │     ├─ multiple_matches → company_choice ← interrupt()
-    │     │     ├─ matched      → check_slots
-    │     │     ├─ extracting   → extract_slots  ← (루프)
-    │     │     └─ cancelled    → cancel → END
-    │     └─ no_match → ask_company ← interrupt()
+    │     └─ multiple_matches → company_choice ← interrupt()
+    │           ├─ matched      → check_slots
     │           ├─ extracting   → extract_slots  ← (루프)
     │           └─ cancelled    → cancel → END
     │
@@ -28,11 +25,9 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.nodes import (
-    ask_company,
     cancel,
     check_slots,
     company_choice,
-    decide_after_ask_company,
     decide_after_check_slots,
     decide_after_company_choice,
     decide_after_search,
@@ -55,7 +50,6 @@ def build_graph() -> StateGraph:
     builder.add_node("extract_slots",   extract_slots)
     builder.add_node("search_company",  search_company)
     builder.add_node("company_choice",  company_choice)
-    builder.add_node("ask_company",     ask_company)
     builder.add_node("check_slots",     check_slots)
     builder.add_node("finalize",        finalize)
     builder.add_node("select_history",  select_history)
@@ -87,7 +81,6 @@ def build_graph() -> StateGraph:
         {
             "check_slots":      "check_slots",
             "company_choice":   "company_choice",
-            "ask_company":      "ask_company",
         },
     )
 
@@ -97,16 +90,6 @@ def build_graph() -> StateGraph:
         decide_after_company_choice,
         {
             "check_slots":    "check_slots",
-            "extract_slots":  "extract_slots",   # ← 루프
-            "cancel":         "cancel",
-        },
-    )
-
-    # ── ask_company 이후 분기 (루프) ──
-    builder.add_conditional_edges(
-        "ask_company",
-        decide_after_ask_company,
-        {
             "extract_slots":  "extract_slots",   # ← 루프
             "cancel":         "cancel",
         },

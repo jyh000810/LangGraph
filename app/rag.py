@@ -67,6 +67,7 @@ async def search_company(
             candidates.append(
                 CompanyCandidate(
                     seq=pt.payload.get("BILLSEQ", ""),
+                    type="MA",
                     company=pt.payload.get("COMPANY", ""),
                     score=pt.score,
                 )
