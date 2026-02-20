@@ -582,7 +582,9 @@ def _match_company_from_candidates(
     3. 거래처명이 사용자 입력에 포함
     """
     user_stripped = user_input.strip()
-
+    user_clean = user_stripped.replace(" ", "").lower()
+    if not user_clean:
+        return None
     # 1순위: 완전 일치
     for c in candidates:
         if user_clean == c.company.replace(" ", "").lower():
